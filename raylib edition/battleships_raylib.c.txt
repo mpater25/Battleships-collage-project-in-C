@@ -1,0 +1,432 @@
+#include "raylib.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+#include <stdbool.h>
+#include <math.h>
+#include <string.h>
+#define GRID_SIZE 10
+#define CELL_SIZE 40
+#define SCREEN_WIDTH (GRID_SIZE * CELL_SIZE * 2 + 100)
+#define SCREEN_HEIGHT (GRID_SIZE * CELL_SIZE + 100)
+
+
+typedef enum { MENU, GAME_MODE, GAME } GameState;
+
+
+#define NORMAL_COLOR CLITERAL(Color){ 20, 20, 120, 255 }
+#define HOVER_COLOR CLITERAL(Color){ 40, 40, 150, 255 }
+#define PRESSED_COLOR CLITERAL(Color){ 10, 10, 100, 255 }
+
+
+int gridPlayer[GRID_SIZE][GRID_SIZE] = {0};
+int gridBot[GRID_SIZE][GRID_SIZE] = {0};
+bool playerTurn = true;
+bool gameOver = false;
+bool previewMode = true;
+bool horizontalPreview = true;
+int previewX = 0, previewY = 0;
+int currentShipIndex = 0;
+
+// 11 nave: {5, 4, 3, 3, 2, 2, 2, 1, 1, 1, 1}
+int shipLengths[] = {5, 4, 3, 3, 2, 2, 2, 1, 1, 1, 1};
+const int totalShips = 11;
+
+Texture2D imgBIG, imgbig, imgmid, imgsmall, imgsub, waterTexture;
+Texture2D shipTextures[11];
+
+
+int shipTypes[11] = {5, 4, 3, 3, 2, 2, 2, 1, 1, 1, 1};
+
+int hitX = -1, hitY = -1;
+bool hasHit = false;
+int direction = 0;
+int dirTried[4] = {0};
+
+void drawGrid(int grid[GRID_SIZE][GRID_SIZE], int offsetX, int offsetY, bool hideShips) {
+    static float waveOffset = 0;
+    waveOffset += 0.03f; // Animatie unda subtila
+
+    for (int i = 0; i < GRID_SIZE; i++) {
+        for (int j = 0; j < GRID_SIZE; j++) {
+            Rectangle cell = { offsetX + j * CELL_SIZE, offsetY + i * CELL_SIZE, CELL_SIZE, CELL_SIZE };
+            
+            // 1. Fundal apă cu undă
+            DrawTexturePro(waterTexture,
+                         (Rectangle){sinf(waveOffset + i)*3, cosf(waveOffset + j)*3, 
+                          waterTexture.width, waterTexture.height},
+                         cell, (Vector2){0, 0}, 0.0f, (Color){255, 255, 255, 230});
+
+            // 2. Bordură celulă subtilă
+            DrawRectangleLinesEx(cell, 1.0f, (Color){0, 50, 100, 100});
+
+            int cellValue = grid[i][j];
+            int baseValue = cellValue % 10;  // Lungimea navei (5,4,3,2,1)
+            int mark = cellValue - baseValue;
+
+            // 3. Desenare nave (jucător) sau nave lovite (bot)
+            if (baseValue >= 1 && baseValue <= 5 && (!hideShips || mark == 10)) {
+                int textureIndex;
+                switch(baseValue) {
+                    case 5: textureIndex = 0; break;
+                    case 4: textureIndex = 1; break;
+                    case 3: textureIndex = 2; break;
+                    case 2: textureIndex = 4; break;
+                    case 1: textureIndex = 7; break;
+                    default: textureIndex = 0;
+                }
+
+                Texture2D tex = shipTextures[textureIndex];
+                
+                // Efect dramatic explozie (doar peste nava lovită)
+                if (mark == 10) {
+                    // 3.1. Nava normală (roșie)
+                    DrawTexturePro(tex, (Rectangle){0, 0, tex.width, tex.height},
+                                 cell, (Vector2){0, 0}, 0.0f, (Color){255, 100, 100, 255});
+                    
+                    // 3.2. Efect explozie (peste nava roșie)
+                    DrawTexturePro(tex, (Rectangle){0, 0, tex.width, tex.height},
+                                 cell, (Vector2){0, 0}, 0.0f, (Color){255, 50, 50, 180});
+                    
+                    // 3.3. Fum explozie
+                    DrawCircle(cell.x + CELL_SIZE/2, cell.y + CELL_SIZE/2, CELL_SIZE/2.5f, Fade(RED, 0.3f));
+                    DrawCircle(cell.x + CELL_SIZE/2, cell.y + CELL_SIZE/2, CELL_SIZE/4.0f, Fade(ORANGE, 0.5f));
+                } 
+                else {
+                    // Nava nevătămată (normală)
+                    DrawTexturePro(tex, (Rectangle){0, 0, tex.width, tex.height},
+                                 cell, (Vector2){0, 0}, 0.0f, WHITE);
+                }
+            }
+
+            
+            if (mark == 10 && baseValue == 0) {
+                // Lovituri în apă
+                DrawLineEx((Vector2){cell.x, cell.y}, (Vector2){cell.x + CELL_SIZE, cell.y + CELL_SIZE}, 3.0f, RED);
+                DrawLineEx((Vector2){cell.x + CELL_SIZE, cell.y}, (Vector2){cell.x, cell.y + CELL_SIZE}, 3.0f, RED);
+            } 
+            else if (mark == 20) {
+                // Rateuri (cercuri albastre)
+                DrawCircle(cell.x + CELL_SIZE/2, cell.y + CELL_SIZE/2, 8, Fade(SKYBLUE, 0.6f));
+                DrawCircle(cell.x + CELL_SIZE/2, cell.y + CELL_SIZE/2, 4, Fade(WHITE, 0.9f));
+            }
+        }
+    }
+}
+
+
+
+
+void drawShipPreview(int x, int y, int length, bool horizontal, int offsetX, int offsetY) {
+    Texture2D tex;
+    switch (length) {
+        case 5: tex = imgBIG; break;
+        case 4: tex = imgbig; break;
+        case 3: tex = imgmid; break;
+        case 2: tex = imgsmall; break;
+        case 1: tex = imgsub; break;
+        default: return;
+    }
+
+    for (int i = 0; i < length; i++) {
+        int dx = horizontal ? i : 0;
+        int dy = horizontal ? 0 : i;
+        Rectangle cell = {
+            offsetX + (x + dx) * CELL_SIZE,
+            offsetY + (y + dy) * CELL_SIZE,
+            CELL_SIZE,
+            CELL_SIZE
+        };
+        DrawTexturePro(tex, (Rectangle){0, 0, tex.width, tex.height}, cell, (Vector2){0, 0}, 0.0f, Fade(WHITE, 0.5f));
+    }
+}
+
+void placeShip(int grid[GRID_SIZE][GRID_SIZE], int x, int y, int length, bool horizontal, int shipCode) {
+    for (int i = 0; i < length; i++) {
+        if (horizontal) grid[y][x + i] = shipCode;
+        else grid[y + i][x] = shipCode;
+    }
+}
+
+bool canPlaceShip(int grid[GRID_SIZE][GRID_SIZE], int x, int y, int length, bool horizontal) {
+    for (int i = 0; i < length; i++) {
+        int nx = horizontal ? x + i : x;
+        int ny = horizontal ? y : y + i;
+        if (nx >= GRID_SIZE || ny >= GRID_SIZE || grid[ny][nx] != 0) return false;
+    }
+    return true;
+}
+
+void placeShipsRandom(int grid[GRID_SIZE][GRID_SIZE]) 
+{
+
+    int shipLayout[] = {5, 4, 3, 3, 2, 2, 2, 1, 1, 1, 1};
+
+    for (int i = 0; i < totalShips; i++) {
+        bool placed = false;
+        int attempts = 0;
+
+        while (!placed && attempts < 100) {
+            int x = GetRandomValue(0, GRID_SIZE - 1);
+            int y = GetRandomValue(0, GRID_SIZE - 1);
+            bool horizontal = GetRandomValue(0, 1);
+
+            if (canPlaceShip(grid, x, y, shipLayout[i], horizontal)) {
+                // Folosim lungimea navei drept cod (5,4,3,2,1)
+                placeShip(grid, x, y, shipLayout[i], horizontal, shipLayout[i]);
+                placed = true;
+            }
+            attempts++;
+        }
+    }
+}
+
+// rest of code unchanged
+
+
+void botMove() {
+    int i = -1, j = -1;
+
+    if (hasHit) {
+        for (int d = 0; d < 4; d++) {
+            if (dirTried[d]) continue;
+            int dx = 0, dy = 0;
+            if (d == 0) dy = -1;
+            if (d == 1) dy = 1;
+            if (d == 2) dx = -1;
+            if (d == 3) dx = 1;
+            int nx = hitX + dx;
+            int ny = hitY + dy;
+            if (nx >= 0 && nx < GRID_SIZE && ny >= 0 && ny < GRID_SIZE) {
+                int cell = gridPlayer[ny][nx];
+                if ((cell - cell % 10) == 0) {
+                    i = ny;
+                    j = nx;
+                    dirTried[d] = 1;
+                    break;
+                }
+            } else {
+                dirTried[d] = 1;
+            }
+        }
+    }
+
+    if (i == -1 || j == -1) {
+        do {
+            i = GetRandomValue(0, GRID_SIZE - 1);
+            j = GetRandomValue(0, GRID_SIZE - 1);
+        } while ((gridPlayer[i][j] - gridPlayer[i][j] % 10) != 0);
+        for (int k = 0; k < 4; k++) dirTried[k] = 0;
+    }
+
+    int base = gridPlayer[i][j] % 10;
+    if (base >= 1 && base <= 6) {
+        gridPlayer[i][j] = base + 10;
+        hitX = j;
+        hitY = i;
+        hasHit = true;
+        for (int k = 0; k < 4; k++) dirTried[k] = 0;
+    } else {
+        gridPlayer[i][j] = base + 20;
+    }
+
+    playerTurn = true;
+}
+
+void handleClick(int grid[GRID_SIZE][GRID_SIZE], int mouseX, int mouseY, int offsetX, int offsetY) {
+    int j = (mouseX - offsetX) / CELL_SIZE;
+    int i = (mouseY - offsetY) / CELL_SIZE;
+    if (i >= 0 && i < GRID_SIZE && j >= 0 && j < GRID_SIZE) {
+        int cell = grid[i][j];
+        int base = cell % 10;
+        int mark = cell - base;
+
+        if (mark == 0) {
+            if (base >= 1 && base <= 6) grid[i][j] = base + 10;
+            else grid[i][j] = base + 20;
+            playerTurn = false;
+        }
+    }
+}
+
+bool isGameOver(int grid[GRID_SIZE][GRID_SIZE]) {
+    for (int i = 0; i < GRID_SIZE; i++) {
+        for (int j = 0; j < GRID_SIZE; j++) {
+            int base = grid[i][j] % 10;
+            int mark = grid[i][j] - base;
+            if (base >= 1 && base <= 6 && mark != 10) return false;
+        }
+    }
+    return true;
+}
+
+
+
+void DrawMenu(Vector2 mousePos, GameState *state, Texture2D waterTex) {
+    // Fundal din textura de apă
+    DrawTexturePro(waterTex,
+        (Rectangle){0, 0, waterTex.width, waterTex.height},
+        (Rectangle){0, 0, SCREEN_WIDTH, SCREEN_HEIGHT},
+        (Vector2){0, 0}, 0, WHITE);
+
+    // Titlu centrat
+    DrawText("BATTLESHIP", SCREEN_WIDTH/2 - MeasureText("BATTLESHIP", 60)/2, 100, 60, BLACK);
+
+    // Buton principal
+    Rectangle btn = {SCREEN_WIDTH/2 - 150, 250, 300, 60};
+    bool hover = CheckCollisionPointRec(mousePos, btn);
+    
+    DrawRectangleRec(btn, hover ? BLUE : DARKBLUE);
+    DrawText("CHOOSE GAME MODE", 
+        btn.x + btn.width/2 - MeasureText("CHOOSE GAME MODE", 30)/2,
+        btn.y + 15, 30, WHITE);
+
+    if (hover && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        *state = GAME_MODE;
+    }
+}
+
+// Draw game mode selection menu
+void DrawGameModeMenu(Vector2 mousePos, GameState *state) {
+    // Fundal semi-transparent
+    DrawRectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, Fade(BLACK, 0.5f));
+
+    // Container meniu
+    Rectangle box = {SCREEN_WIDTH/2 - 200, 150, 400, 300};
+    DrawRectangleRec(box, RAYWHITE);
+    DrawRectangleLinesEx(box, 3, DARKBLUE);
+
+    // Buton Default
+    Rectangle btn = {box.x + 50, box.y + 100, 300, 50};
+    bool hover = CheckCollisionPointRec(mousePos, btn);
+    
+    DrawRectangleRec(btn, hover ? BLUE : DARKBLUE);
+    DrawText("DEFAULT", 
+        btn.x + btn.width/2 - MeasureText("DEFAULT", 30)/2,
+        btn.y + 10, 30, WHITE);
+
+    // Buton Back
+    Rectangle backBtn = {box.x + 50, box.y + 200, 300, 50};
+    bool backHover = CheckCollisionPointRec(mousePos, backBtn);
+    
+    DrawRectangleRec(backBtn, backHover ? RED : MAROON);
+    DrawText("BACK", 
+        backBtn.x + backBtn.width/2 - MeasureText("BACK", 30)/2,
+        backBtn.y + 10, 30, WHITE);
+
+    // Acțiuni butoane
+    if (hover && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        *state = GAME;
+    }
+    if (backHover && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+        *state = MENU;
+    }
+}
+
+
+
+
+int main(void) {
+    InitWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "Battleship cu Imagini pe Celule");
+    SetTargetFPS(60);
+
+    imgBIG = LoadTexture("C:\\Users\\Mihai\\Desktop\\TP PROJECT\\imagini pentru joc\\nave\\nava 5 pe 2\\BIGship.png");
+    imgbig = LoadTexture("C:\\Users\\Mihai\\Desktop\\TP PROJECT\\imagini pentru joc\\nave\\nava 4 pe 2\\bigship.png");
+    imgmid = LoadTexture("C:\\Users\\Mihai\\Desktop\\TP PROJECT\\imagini pentru joc\\nave\\nava 3 pe 2\\midship.png");
+    imgsmall = LoadTexture("C:\\Users\\Mihai\\Desktop\\TP PROJECT\\imagini pentru joc\\nave\\nava 2 pe 2\\smallship.png");
+    imgsub = LoadTexture("C:\\Users\\Mihai\\Desktop\\TP PROJECT\\imagini pentru joc\\nave\\submarin\\submarin.png");
+    waterTexture = LoadTexture("C:\\Users\\Mihai\\Desktop\\TP PROJECT\\imagini pentru joc\\water_normal_texture.png");
+    shipTextures[0] = imgBIG;   // 5-cell ship
+shipTextures[1] = imgbig;   // 4-cell ship
+shipTextures[2] = imgmid;   // 3-cell ship
+shipTextures[4] = imgsmall;   // 3-cell ship
+shipTextures[7] = imgsub; // 2-cell ship
+    placeShipsRandom(gridBot);
+
+    GameState state = MENU;
+
+    while (!WindowShouldClose()) {
+        if (IsKeyPressed(KEY_R)) horizontalPreview = !horizontalPreview;
+
+        Vector2 mouse = GetMousePosition();
+        previewX = (mouse.x - 50) / CELL_SIZE;
+        previewY = (mouse.y - 50) / CELL_SIZE;
+
+
+        if(state==GAME){
+        if (previewMode && IsMouseButtonPressed(MOUSE_LEFT_BUTTON)) {
+            if (canPlaceShip(gridPlayer, previewX, previewY, shipLengths[currentShipIndex], horizontalPreview)) {
+                placeShip(gridPlayer, previewX, previewY, shipLengths[currentShipIndex], horizontalPreview, shipLengths[currentShipIndex]);
+                currentShipIndex++;
+                if (currentShipIndex >= totalShips) previewMode = false;
+            }
+        }
+
+        if (!gameOver && !previewMode && !playerTurn) botMove();
+
+        if (!gameOver && !previewMode && IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && playerTurn) {
+            if (mouse.x > SCREEN_WIDTH / 2) handleClick(gridBot, mouse.x, mouse.y, SCREEN_WIDTH / 2 + 50, 50);
+        }
+
+        if (!gameOver && !previewMode && (isGameOver(gridPlayer) || isGameOver(gridBot))) {
+            gameOver = true;
+        }
+        }
+        
+        
+        
+
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
+        
+        
+        switch (state) {
+            case MENU:
+                DrawMenu(mouse, &state, waterTexture);
+                break;
+                
+            case GAME_MODE:
+                DrawGameModeMenu(mouse, &state);
+                break;
+                
+            case GAME:
+                drawGrid(gridPlayer, 50, 50, false);
+        drawGrid(gridBot, SCREEN_WIDTH / 2 + 50, 50, true);
+
+        if (previewMode) drawShipPreview(previewX, previewY, shipLengths[currentShipIndex], horizontalPreview, 50, 50);
+
+        DrawText("Player", 50, 20, 20, BLACK);
+        DrawText("Bot", SCREEN_WIDTH / 2 + 50, 20, 20, BLACK);
+
+        if (previewMode)
+            DrawText("Apasa R pentru a roti nava, Click pentru plasare", 50, SCREEN_HEIGHT - 30, 20, DARKGRAY);
+
+        if (gameOver) {
+            DrawText("GAME OVER", SCREEN_WIDTH / 2 - 100, SCREEN_HEIGHT / 2 - 20, 40, RED);
+        }
+                break;
+        }
+
+        if (state == GAME && previewMode && currentShipIndex == 0) {
+            memset(gridPlayer, 0, sizeof(gridPlayer));
+            memset(gridBot, 0, sizeof(gridBot));
+            placeShipsRandom(gridBot);
+            gameOver = false;
+            playerTurn = true;
+            previewMode = true;
+        }
+        
+
+        EndDrawing();
+    }
+
+    UnloadTexture(imgBIG);
+    UnloadTexture(imgbig);
+    UnloadTexture(imgmid);
+    UnloadTexture(imgsmall);
+    UnloadTexture(imgsub);
+    UnloadTexture(waterTexture);
+
+    CloseWindow();
+    return 0;
+}
